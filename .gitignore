@@ -1,0 +1,14 @@
+/target
+/installer/target
+/installer/dist
+
+# Conversion output and loose copies of the test data; the radiographs
+# themselves live in data-test/ (Git LFS).
+*.dcm
+/RG_Output_*.txt
+
+# snapcraft
+*.snap
+/parts
+/stage
+/prime

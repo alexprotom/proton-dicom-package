@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.ico binary
+*.png binary
+
+# Test data: proton radiographs (ROOT TTree::Scan text, ~8 MB each) in Git LFS.
+# CI checks out without LFS (actions/checkout's default), so it never spends
+# the LFS bandwidth quota.
+data-test/** filter=lfs diff=lfs merge=lfs -text
