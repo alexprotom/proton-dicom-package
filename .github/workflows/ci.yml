@@ -1,0 +1,127 @@
+name: CI
+
+# Pull requests only, deliberately (the same arrangement as Rust DICOM
+# Station). A pull-request check builds `refs/pull/N/merge` - the branch
+# already merged into its base - so once it is green, the exact tree that
+# will land has been tested. Branch protection ("require a pull request",
+# "require status checks", "require branches to be up to date") keeps
+# anything else from reaching develop or main.
+#
+# `workflow_dispatch` is the manual way to run the whole thing on any branch.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Incremental compilation only pays off across edits of one working copy.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  # Formatting, lints and the tool lists. Platform-independent, so once, on
+  # Linux. The test data in data-test/ is in Git LFS and is not checked out
+  # (`lfs: false` is the default) - nothing here needs it.
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Every tool is in the snap
+        run: bash .github/scripts/check-tool-lists.sh
+
+  # The tools' tests on both platforms.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The one thing the Linux lint job cannot see: code behind cfg(windows).
+      - name: cargo clippy (windows)
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  # The Windows installer is a separate workspace that `cargo build` in the
+  # repository root never builds, and it only builds for Windows
+  # (`compile_error!` elsewhere). Its unit tests run here, and then the real
+  # thing: pack the debug tools into an installer, install it silently, run a
+  # conversion with the installed tool, and uninstall it again.
+  installer:
+    name: installer (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            installer -> target
+
+      - name: cargo fmt --check
+        working-directory: installer
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: installer
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: installer
+        run: cargo test
+
+      # Debug builds: what this proves is that everything compiles, links,
+      # packs and installs. The optimised installer is built by the release
+      # workflow, which runs the same smoke test on it.
+      - name: Build the tools
+        run: cargo build --workspace
+
+      - name: Build and pack the installer
+        working-directory: installer
+        run: |
+          cargo build
+          cargo run --bin pdp-pack -- --bin-dir ../target/debug --setup target/debug/pdp-setup.exe --out dist/pdp-test-setup.exe
+
+      - name: Install, use and uninstall
+        shell: pwsh
+        run: ./.github/scripts/smoke-test-installer.ps1 -Installer installer/dist/pdp-test-setup.exe

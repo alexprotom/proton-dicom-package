@@ -1,0 +1,54 @@
+# Snap recipe for the Proton DICOM Package command-line tools.
+# What it does and why, and how a version gets to the Snap Store: docs/snap.md.
+name: proton-dicom-package
+title: Proton DICOM Package
+base: core24
+adopt-info: tools
+summary: Command-line tools for proton radiography and CT data in DICOM
+description: |
+  Open-source command-line utilities for proton radiography and CT in DICOM,
+  for research and QA. Not a medical device.
+
+  Tools:
+
+  * prad-rti-gen - converts proton radiography WEPL maps (ROOT TTree::Scan
+    text output) into DICOM RT Image files, one series per run, configured
+    by a TOML file (units, pixel spacing, SAD/SID, angles, patient/study).
+
+  The commands are proton-dicom-package.<tool>, for example
+  `proton-dicom-package.prad-rti-gen --help`. A short name is one alias away:
+  `sudo snap alias proton-dicom-package.prad-rti-gen prad-rti-gen`.
+
+  Files are read and written in your home folder (not hidden folders at its
+  top level). For USB drives and mounted shares under /media or /mnt:
+  `sudo snap connect proton-dicom-package:removable-media`.
+grade: stable
+confinement: strict
+license: MIT
+icon: assets/proton-dicom-package.png
+website: https://github.com/alexprotom/proton-dicom-package
+source-code: https://github.com/alexprotom/proton-dicom-package
+issues: https://github.com/alexprotom/proton-dicom-package/issues
+
+platforms:
+  amd64:
+
+parts:
+  tools:
+    plugin: rust
+    source: .
+    # One entry per crate under crates/ that builds a tool. A new tool is
+    # added here and as an app below.
+    rust-path:
+      - crates/prad-rti-gen
+    override-pull: |
+      craftctl default
+      # The workspace version, read the same way as by the release workflow.
+      craftctl set version="$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n 1)"
+
+apps:
+  prad-rti-gen:
+    command: bin/prad-rti-gen
+    plugs:
+      - home
+      - removable-media

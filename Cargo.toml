@@ -1,0 +1,36 @@
+# proton-dicom-package — command-line utilities for proton radiography and CT
+# data in DICOM.
+#
+# Every tool is a crate under crates/. They share one version, set here: the
+# release workflow reads it (first `version = "…"` line of this file), tags the
+# release v<version>, and the installer and the snap carry it.
+#
+# The Windows installer (installer/) is a separate workspace and is never built
+# from here.
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Alexander Pryanichnikov"]
+repository = "https://github.com/alexprotom/proton-dicom-package"
+
+[workspace.dependencies]
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+dicom-core = "0.10"
+dicom-dictionary-std = "0.10"
+dicom-object = "0.10"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

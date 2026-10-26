@@ -1,0 +1,9 @@
+# Link the C runtime statically on Windows. The executables - the tools and
+# the installer - then start on any Windows 10/11 machine without the
+# Microsoft Visual C++ redistributable, so the installer has nothing to fetch
+# and a tool copied out of the program folder still runs.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

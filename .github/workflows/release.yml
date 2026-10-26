@@ -1,0 +1,398 @@
+name: Release
+
+# Every push to main is a release: the version in the root Cargo.toml must
+# be new (docs/release-versioning.md). Builds the Windows installer (with its
+# winget manifests), a Linux tarball and the snap, and publishes them as the
+# GitHub Release v<version>.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Written once and never read again on a fresh runner.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ==========================================================================
+  # Determine the version
+  # ==========================================================================
+  version:
+    name: Determine version
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # The first `version = "…"` line of the root Cargo.toml: the
+      # [workspace.package] version every tool inherits.
+      - name: Read version from Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n 1)
+
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not determine version from Cargo.toml"
+            exit 1
+          fi
+
+          TAG="v${VERSION}"
+
+          echo "Version: $VERSION"
+          echo "Tag:     $TAG"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check that release tag does not already exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::GitHub Release $TAG already exists."
+            echo "::error::Update the version in Cargo.toml before merging a new release into main."
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Git tag $TAG already exists."
+            echo "::error::Update the version in Cargo.toml before merging a new release into main."
+            exit 1
+          fi
+
+          echo "Tag $TAG is available."
+
+  # ==========================================================================
+  # Windows installer
+  # ==========================================================================
+  # The tools and the installer are separate Cargo workspaces with separate
+  # target directories, so they are built side by side and handed to a third
+  # job that packs them; `pdp-pack` takes the paths, so it does not care
+  # where they came from.
+  windows-tools:
+    name: Windows tools
+    needs: version
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # Every tool of the workspace; the C runtime is linked statically
+      # (.cargo/config.toml).
+      - name: Build tools
+        run: cargo build --release --workspace
+
+      - name: Upload tool executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-tools-exe
+          path: target/release/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-setup:
+    name: Windows setup binaries
+    needs: version
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: installer
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: installer
+
+      # Build pdp-setup.exe and pdp-pack.exe.
+      - name: Build installer
+        run: cargo build --release
+
+      - name: Upload setup binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup-exe
+          path: |
+            installer/target/release/pdp-setup.exe
+            installer/target/release/pdp-pack.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  windows:
+    name: Windows installer
+    needs: [version, windows-tools, windows-setup]
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download tool executables
+        uses: actions/download-artifact@v5
+        with:
+          name: windows-tools-exe
+          path: built/tools
+
+      - name: Download setup binaries
+        uses: actions/download-artifact@v5
+        with:
+          name: windows-setup-exe
+          path: built/setup
+
+      # pdp-pack combines pdp-setup.exe with the tools and the docs. It needs
+      # no toolchain: it is one of the executables just downloaded. It finds
+      # the tools from crates/ in the checkout and takes them from
+      # built/tools.
+      #
+      # `--winget` also writes the three winget manifests for exactly this
+      # file (its SHA-256, the URL it will have on the release). They are
+      # attached to the release as a zip: the first submission to
+      # microsoft/winget-pkgs is made from them by hand, every later one by
+      # the `winget` job below.
+      - name: Package Windows installer
+        shell: pwsh
+        run: |
+          $out = "proton-dicom-package-${{ needs.version.outputs.version }}-windows-x86_64.exe"
+
+          & built/setup/pdp-pack.exe `
+            --repo . `
+            --bin-dir built/tools `
+            --setup built/setup/pdp-setup.exe `
+            --out $out `
+            --winget winget-manifests `
+            --release-date (Get-Date -AsUTC -Format yyyy-MM-dd)
+
+          if (!(Test-Path $out)) {
+            Write-Error "Expected installer not found: $out"
+            exit 1
+          }
+
+          Write-Host "Created $out"
+
+      # The installer that is about to be published, installed silently,
+      # used for a conversion, and uninstalled again.
+      - name: Install, use and uninstall
+        shell: pwsh
+        run: ./.github/scripts/smoke-test-installer.ps1 -Installer "proton-dicom-package-${{ needs.version.outputs.version }}-windows-x86_64.exe"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: proton-dicom-package-${{ needs.version.outputs.version }}-windows-x86_64.exe
+          if-no-files-found: error
+
+      - name: Upload winget manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-winget
+          path: winget-manifests/*.yaml
+          if-no-files-found: error
+
+  # ==========================================================================
+  # Linux tarball
+  # ==========================================================================
+  # The tools as plain executables, for machines without snapd (clusters,
+  # containers). Built on the oldest supported runner so the glibc they need
+  # is old enough for most distributions.
+  linux:
+    name: Linux tarball
+    needs: version
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build tools
+        run: cargo build --release --workspace
+
+      - name: Pack tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="proton-dicom-package-${{ needs.version.outputs.version }}-linux-x86_64"
+          mkdir -p "$name/bin"
+          # Every executable cargo put at the top of target/release.
+          find target/release -maxdepth 1 -type f -executable -exec cp {} "$name/bin/" \;
+          ls -l "$name/bin"
+          for tool in "$name"/bin/*; do "$tool" --version; done
+          cp README.md LICENSE.txt "$name/"
+          cp -r docs "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          echo "Created $name.tar.gz"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: proton-dicom-package-${{ needs.version.outputs.version }}-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  # ==========================================================================
+  # Snap
+  # ==========================================================================
+  # snap.yml builds the snap, installs and tests it on the runner, and
+  # releases it to the Snap Store: to `stable`, or to the channel in the
+  # repository variable SNAP_CHANNEL. Without the secret
+  # SNAPCRAFT_STORE_CREDENTIALS it is built and tested but not uploaded
+  # (docs/snap.md). The GitHub Release below does not wait for it.
+  snap:
+    name: Snap
+    needs: version
+    uses: ./.github/workflows/snap.yml
+    with:
+      channel: ${{ vars.SNAP_CHANNEL || 'stable' }}
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
+  # ==========================================================================
+  # GitHub Release
+  # ==========================================================================
+  release:
+    name: Create GitHub Release
+    needs:
+      - version
+      - windows
+      - linux
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: windows-release
+          path: release
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: linux-release
+          path: release
+
+      - name: Download winget manifests
+        uses: actions/download-artifact@v5
+        with:
+          name: windows-winget
+          path: winget-manifests
+
+      # Kept out of SHA256SUMS on purpose: the manifests themselves carry the
+      # installer's hash, and nothing downloads them automatically.
+      - name: Zip winget manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd winget-manifests && zip -q "../release/proton-dicom-package-${{ needs.version.outputs.version }}-winget-manifests.zip" ./*.yaml)
+
+      - name: List release files
+        shell: bash
+        run: ls -lh release
+
+      # The installed program's updater checks the installer it downloads
+      # against this file, by the installer's exact name.
+      - name: Generate SHA256 checksums
+        working-directory: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha256sum \
+            proton-dicom-package-*.exe \
+            proton-dicom-package-*.tar.gz \
+            > SHA256SUMS
+
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release create \
+            "${{ needs.version.outputs.tag }}" \
+            release/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Proton DICOM Package ${{ needs.version.outputs.version }}" \
+            --generate-notes
+
+  # ==========================================================================
+  # winget
+  # ==========================================================================
+  # Opens the pull request that adds this version to microsoft/winget-pkgs,
+  # so `winget upgrade` offers it. Needs a classic personal access token with
+  # the `public_repo` scope, saved as the repository secret WINGET_TOKEN, and
+  # a fork of microsoft/winget-pkgs under the same account.
+  #
+  # Without the secret the job only says so and succeeds, so a release is
+  # never held up by it. The action updates a package that already exists:
+  # the very first version is submitted by hand from the manifests zip
+  # attached to the release, and the secret is added once winget-pkgs has
+  # accepted it (docs/release-versioning.md).
+  winget:
+    name: Submit to winget
+    needs:
+      - version
+      - release
+    runs-on: ubuntu-latest
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+
+    steps:
+      - name: No token, no submission
+        if: env.WINGET_TOKEN == ''
+        run: echo "WINGET_TOKEN is not set - skipping the winget submission."
+
+      - name: Submit the new version to winget-pkgs
+        if: env.WINGET_TOKEN != ''
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: PDP.ProtonDICOMPackage
+          version: ${{ needs.version.outputs.version }}
+          release-tag: ${{ needs.version.outputs.tag }}
+          installers-regex: '-windows-x86_64\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}

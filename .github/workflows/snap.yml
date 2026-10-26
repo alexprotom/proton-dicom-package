@@ -1,0 +1,144 @@
+name: Snap
+
+# Builds the snap from snap/snapcraft.yaml, installs it on the runner, checks
+# that every tool runs inside the confinement and converts a radiograph, and
+# publishes it to the Snap Store when the secret SNAPCRAFT_STORE_CREDENTIALS
+# is set (docs/snap.md).
+#
+# Two ways in:
+#   * Actions > Snap > Run workflow: a test build of any branch. The snap is
+#     attached to the run as the `linux-snap` artifact, and released to the
+#     channel picked there, if any.
+#   * the release workflow calls it on every push to main, after the version
+#     check, with the release's version and channel.
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Snap Store channel for this build
+        type: choice
+        options:
+          - none
+          - edge
+          - beta
+          - candidate
+        default: none
+  workflow_call:
+    inputs:
+      channel:
+        description: Snap Store channel to release to (none - build and test only)
+        type: string
+        default: none
+      version:
+        description: The version the snap must carry (from Cargo.toml)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  snap:
+    name: Linux snap
+    runs-on: ubuntu-24.04
+    env:
+      SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+
+    steps:
+      # Without LFS: the test data is not part of the snap.
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # snapcraft in a fresh LXD container: rustup and the release build of
+      # every tool. Nothing is cached between runs.
+      - name: Build snap
+        id: build
+        uses: snapcore/action-build@v1
+
+      - name: Check the snap's version
+        if: inputs.version != ''
+        shell: bash
+        env:
+          SNAP_FILE: ${{ steps.build.outputs.snap }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          case "$SNAP_FILE" in
+            *"_${VERSION}_"*) echo "$SNAP_FILE carries $VERSION" ;;
+            *)
+              echo "::error::$SNAP_FILE does not carry the version $VERSION"
+              exit 1
+              ;;
+          esac
+
+      - name: Install the snap
+        shell: bash
+        env:
+          SNAP_FILE: ${{ steps.build.outputs.snap }}
+        run: |
+          set -euo pipefail
+          # snapd puts each snap's runtime folder under XDG_RUNTIME_DIR; the
+          # runner's service user has no login session to create it.
+          uid=$(id -u)
+          sudo install -d -m 700 -o "$uid" "/run/user/$uid"
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          sudo snap install --dangerous "$SNAP_FILE"
+          snap connections proton-dicom-package
+
+      # Every app answers --version inside the confinement.
+      - name: The tools start
+        shell: bash
+        run: |
+          set -euo pipefail
+          apps=$(awk '/^apps:/{a=1;next} a && /^  [a-z0-9-]+:[[:space:]]*$/{gsub(/[ :]/,"");print}' snap/snapcraft.yaml)
+          for app in $apps; do
+            echo "== proton-dicom-package.$app"
+            "/snap/bin/proton-dicom-package.$app" --version
+          done
+
+      # A real conversion, in the home folder the `home` interface grants.
+      - name: prad-rti-gen converts a radiograph
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$HOME/pdp-snap-test"
+          mkdir -p "$work"
+          {
+            echo '************************************************'
+            echo '*    Row   *       x.x *       y.y * WEPL.WEPL *'
+            echo '************************************************'
+            awk 'BEGIN { r = 0; for (x = 0; x < 4; x++) for (y = 0; y < 3; y++)
+              printf "* %8d * %9d * %9d * %9.7f *\n", r++, x, y, 0.1 * (x + 10 * y) }'
+            echo '************************************************'
+          } > "$work/RG_Output_0.txt"
+          cd "$work"
+          /snap/bin/proton-dicom-package.prad-rti-gen RG_Output_0.txt -o dicom
+          magic=$(dd if=dicom/RG_Output_0.dcm bs=1 skip=128 count=4 2>/dev/null)
+          if [ "$magic" != "DICM" ]; then
+            echo "::error::dicom/RG_Output_0.dcm is not a DICOM file"
+            exit 1
+          fi
+          ls -l dicom
+
+      - name: Upload snap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-snap
+          path: ${{ steps.build.outputs.snap }}
+          if-no-files-found: error
+
+      - name: No channel, no upload
+        if: inputs.channel == 'none'
+        run: echo "No channel requested - the snap is not uploaded."
+
+      - name: No credentials, no upload
+        if: inputs.channel != 'none' && env.SNAPCRAFT_STORE_CREDENTIALS == ''
+        run: echo "SNAPCRAFT_STORE_CREDENTIALS is not set - skipping the Snap Store upload."
+
+      - name: Publish to the Snap Store
+        if: inputs.channel != 'none' && env.SNAPCRAFT_STORE_CREDENTIALS != ''
+        uses: snapcore/action-publish@v1
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: ${{ inputs.channel }}
