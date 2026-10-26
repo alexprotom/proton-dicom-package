@@ -1,0 +1,102 @@
+# prad-rti-gen configuration
+#
+# Every key is optional: anything you leave out falls back to the value
+# shown here. Generate a fresh copy with:  prad-rti-gen --init-config
+#
+# Lookup order when --config is not given:
+#   1. ./prad-rti-gen.toml          (current working directory)
+#   2. prad-rti-gen.toml next to the executable
+#   3. built-in defaults (this file, compiled in)
+
+[input]
+# Column names in the ROOT TTree::Scan header line
+x_column     = "x.x"
+y_column     = "y.y"
+value_column = "WEPL.WEPL"
+
+# Unit of the WEPL values in the text file: "cm" or "mm"
+wepl_unit = "cm"
+
+# Orientation of the bin indices
+#   y_axis_up    = true  -> y increases upwards (ROOT TH2 / IEC convention):
+#                           the highest y becomes the top row of the DICOM image
+#   y_axis_up    = false -> y = 0 is the top row
+#   x_axis_right = true  -> x increases to the right (x = 0 is the left column)
+y_axis_up    = true
+x_axis_right = true
+
+# WEPL assigned to grid positions that are absent from the file or are NaN
+missing_value = 0.0
+
+[image]
+# Unit of the WEPL stored in DICOM (pixel * RescaleSlope + RescaleIntercept): "mm" or "cm"
+output_unit = "mm"
+
+# WEPL per stored 16-bit pixel value, in output_unit.
+# 0.01 mm -> 10 um resolution, max 655 mm. Increased automatically (next power
+# of ten, with a warning) if the image maximum would not fit into 16 bits.
+rescale_slope = 0.01
+
+# Rescale Type (0028,1054). Leave empty for "WEPL_MM" / "WEPL_CM".
+rescale_type = ""
+
+# Image Plane Pixel Spacing (3002,0011) in mm at the image plane (RT Image SID):
+#   [row spacing (vertical), column spacing (horizontal)]
+pixel_spacing_mm = [1.0, 1.0]
+
+# RT Image Position (3002,0012): x, y (mm) of the centre of the top-left pixel in
+# the image-plane coordinate system. Leave empty [] to centre the image on the beam axis.
+rt_image_position_mm = []
+
+# Image Type (0008,0008); value 3 must be one of DRR, PORTAL, SIMULATOR, RADIOGRAPH, BLANK, FLUENCE
+image_type = ["DERIVED", "SECONDARY", "RADIOGRAPH"]
+
+# Conversion Type (0008,0064): DV, DI, DF, WSD
+conversion_type = "WSD"
+
+# RT Image Label (3002,0002), max 16 characters. Empty -> input file name (stem).
+rt_image_label       = ""
+rt_image_name        = "Proton radiograph"
+rt_image_description = "Water-equivalent path length (WEPL) map from proton radiography"
+
+# Display window [centre, width] in output_unit. Empty [] -> min..max of the image.
+window = []
+
+[geometry]
+radiation_machine_name = ""
+# Primary Dosimeter Unit (300A,00B3): MU, MINUTE, NP (number of particles) or empty
+primary_dosimeter_unit = ""
+# Source-axis distance and source-to-image-plane distance in mm.
+# If the WEPL image is reconstructed at the isocentre plane, set SID = SAD.
+radiation_machine_sad_mm = 1000.0
+rt_image_sid_mm          = 1000.0
+gantry_angle_deg                = 0.0
+beam_limiting_device_angle_deg  = 0.0
+patient_support_angle_deg       = 0.0
+x_ray_image_receptor_angle_deg  = 0.0
+# X-Ray Image Receptor Translation (3002,000D) [x, y, z] in mm. Empty [] -> not written.
+x_ray_image_receptor_translation_mm = []
+
+[patient]
+name       = "PRAD^Phantom"   # DICOM PN format: Family^Given
+id         = "PRAD0001"
+birth_date = ""               # YYYYMMDD or empty
+sex        = ""               # M, F, O or empty
+
+[study]
+# Leave UIDs empty to generate new ones (2.25.<uuid>). Set study / frame-of-reference
+# UIDs to those of a planning CT to link the radiographs to that study.
+study_instance_uid     = ""
+series_instance_uid    = ""
+frame_of_reference_uid = ""
+study_id            = "1"
+study_description   = "Proton radiography"
+accession_number    = ""
+referring_physician = ""
+series_number       = 1
+series_description  = "Proton radiographs (WEPL)"
+operator            = ""
+institution_name    = ""
+manufacturer        = ""
+# Character set (0008,0005). "ISO_IR 100" = Latin-1, "ISO_IR 192" = UTF-8
+specific_character_set = "ISO_IR 100"

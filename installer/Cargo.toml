@@ -1,0 +1,68 @@
+# Windows installer for the Proton DICOM Package command-line tools - a port
+# of the Rust DICOM Station installer (same wizard, same update and winget
+# machinery), trimmed to what a set of console tools needs.
+#
+# This crate is its own workspace root (the empty `[workspace]` table below).
+# That keeps it out of the tools' build graph: `cargo build --release` in the
+# repository root never compiles the installer, and building the installer
+# never touches the tools' `target/` directory.
+#
+#   cargo build --release                  # 1. the tools, from the repository root
+#   cd installer
+#   cargo build --release                  # 2. pdp-setup.exe + pdp-pack.exe
+#   cargo run --release --bin pdp-pack     # 3. dist/proton-dicom-package-setup.exe
+
+[package]
+name = "pdp-setup"
+version = "0.1.0"
+edition = "2021"
+description = "Windows installer for the Proton DICOM Package command-line tools"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "pdp-setup"
+path = "src/main.rs"
+
+[[bin]]
+name = "pdp-pack"
+path = "src/bin/pack.rs"
+
+[dependencies]
+anyhow = "1.0"
+walkdir = "2.5"
+rfd = "0.17"                        # native folder picker
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# rustls + OS trust store: works behind corporate TLS-inspection proxies with
+# custom CAs.
+ureq = { version = "2", features = ["native-certs"] }
+# Checks a downloaded release installer against the release's SHA256SUMS
+# before running it, and hashes the installer for the winget manifest.
+sha2 = "0.10"
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu"] }
+egui = "0.36"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Storage_FileSystem",
+] }
+
+# The setup executable's own icon resource (see `build.rs`).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true
